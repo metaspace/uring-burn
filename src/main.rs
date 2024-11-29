@@ -123,7 +123,8 @@ impl State<u64> {
         bs: Byte,
         direct: bool,
     ) -> Result<Self> {
-        let shift = bs.as_u64().ilog2().try_into()?;
+        let bs = bs.as_u64_checked().ok_or(anyhow!("Failed to convert bs"))?;
+        let shift = bs.ilog2().try_into()?;
 
         let mut free_list = smallset::SmallSet::new();
         for i in 0..depth {
@@ -149,17 +150,28 @@ impl State<u64> {
 
         let mut buffers = Vec::new();
         for _ in 0..depth {
-            buffers.push(NonNull::new(unsafe { libc::memalign(bs.as_u64().try_into()?, bs.as_u64().try_into()?) }).ok_or(anyhow!("Allocation failed"))?);
+            buffers.push(
+                NonNull::new(unsafe { libc::memalign(bs as usize, bs as usize) })
+                    .ok_or(anyhow!("Allocation failed"))?,
+            );
         }
 
-        let ring  = io_uring::IoUring::new(depth)?;
+        let ring = io_uring::IoUring::new(depth)?;
         ring.submitter().register_files(&[file.as_raw_fd()])?;
+        let iovs: Vec<libc::iovec> = buffers
+            .iter()
+            .map(|p| libc::iovec {
+                iov_base: p.as_ptr(),
+                iov_len: bs as usize,
+            })
+            .collect();
+        unsafe { ring.submitter().register_buffers(&iovs)? };
 
         Ok(Self {
             file,
             ring,
             depth,
-            bs: bs.as_u64().try_into()?,
+            bs: bs.try_into()?,
             buf: buffers,
             dist: rand::distributions::Uniform::from(0..(size >> shift)),
             rng: lineargen::Linear64::seed_from_u64(384324),
@@ -274,11 +286,13 @@ fn enqueue_io(state: &mut State<u64>) -> Result<()> {
 
     let offset = state.get_offset();
 
-    let opcode = io_uring::opcode::Read::new(
+    //let opcode = io_uring::opcode::Read::new(
+    let opcode = io_uring::opcode::ReadFixed::new(
         //io_uring::types::Fd(state.file.as_raw_fd()),
         io_uring::types::Fixed(0),
         state.buf[buffer_index as usize].as_ptr().cast(),
         state.bs as _,
+        buffer_index as u16,
     )
     .offset(offset)
     .build()
