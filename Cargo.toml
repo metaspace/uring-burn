@@ -1,0 +1,21 @@
+[package]
+name = "uring-burn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.93"
+byte-unit = "5.1.6"
+clap = { version = "4.5.21", features = ["derive"] }
+colog = "1.3.0"
+core_affinity = "0.8.1"
+errno = "0.3.10"
+humantime = "2.1.0"
+io-uring = { version = "0.7.2", features = ["direct-syscall"] }
+libc = "0.2.167"
+lineargen = "0.1.0"
+log = "0.4.22"
+num_cpus = "1.16.0"
+rand = "0.8.5"
+rand_core = "0.6.4"
+smallset = "0.1.1"
