@@ -152,9 +152,12 @@ impl State<u64> {
             buffers.push(NonNull::new(unsafe { libc::memalign(bs.as_u64().try_into()?, bs.as_u64().try_into()?) }).ok_or(anyhow!("Allocation failed"))?);
         }
 
+        let ring  = io_uring::IoUring::new(depth)?;
+        ring.submitter().register_files(&[file.as_raw_fd()])?;
+
         Ok(Self {
             file,
-            ring: io_uring::IoUring::new(depth)?,
+            ring,
             depth,
             bs: bs.as_u64().try_into()?,
             buf: buffers,
@@ -272,7 +275,8 @@ fn enqueue_io(state: &mut State<u64>) -> Result<()> {
     let offset = state.get_offset();
 
     let opcode = io_uring::opcode::Read::new(
-        io_uring::types::Fd(state.file.as_raw_fd()),
+        //io_uring::types::Fd(state.file.as_raw_fd()),
+        io_uring::types::Fixed(0),
         state.buf[buffer_index as usize].as_ptr().cast(),
         state.bs as _,
     )
