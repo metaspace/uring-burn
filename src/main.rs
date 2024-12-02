@@ -100,7 +100,7 @@ struct State<T>
 where
     T: SampleUniform,
 {
-    file: std::fs::File,
+    _file: std::fs::File,
     ring: io_uring::IoUring,
     depth: u32,
     bs: u32,
@@ -168,7 +168,7 @@ impl State<u64> {
         unsafe { ring.submitter().register_buffers(&iovs)? };
 
         Ok(Self {
-            file,
+            _file: file,
             ring,
             depth,
             bs: bs.try_into()?,
@@ -249,15 +249,13 @@ fn burn<const RAMP: bool>(
             state.check = 0;
             let duration = start.elapsed();
 
-            if !RAMP {
-                if duration - old_duration > std::time::Duration::from_secs(1) {
-                    tx.send(Message::Progress {
-                        iops: state.done,
-                        duration,
-                        id,
-                    })?;
-                    old_duration = duration;
-                }
+            if !RAMP && duration - old_duration > std::time::Duration::from_secs(1) {
+                tx.send(Message::Progress {
+                    iops: state.done,
+                    duration,
+                    id,
+                })?;
+                old_duration = duration;
             }
 
             if duration > time {
