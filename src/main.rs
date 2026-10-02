@@ -59,6 +59,12 @@ struct Args {
     /// single-threaded (functional) mode.
     #[clap(long)]
     output: Option<PathBuf>,
+
+    /// Repeat the `--input` file as many times as needed to satisfy the
+    /// requested block count. Without this, an input shorter than the request
+    /// is an error.
+    #[clap(long)]
+    loop_input: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -94,6 +100,9 @@ fn main() -> Result<()> {
     }
     if args.output.is_some() && args.rw != Rw::Read {
         return Err(anyhow!("--output is only valid with --rw read"));
+    }
+    if args.loop_input && args.input.is_none() {
+        return Err(anyhow!("--loop-input requires --input"));
     }
     if (args.input.is_some() || args.output.is_some()) && args.threads > 1 {
         return Err(anyhow!(
@@ -187,6 +196,9 @@ where
     submitted: u64,
     /// Payload source for writes (`--input`).
     input: Option<File>,
+    /// Number of whole blocks in the input file; the source position wraps
+    /// modulo this when `--loop-input` is set.
+    input_blocks: u64,
     /// Sink for reads (`--output`).
     output: Option<File>,
     /// Device offset of the in-flight IO using each buffer, indexed by buffer.
@@ -246,13 +258,40 @@ impl State<u64> {
 
         let region_blocks = size >> shift;
         let mut limit = args.blocks;
+        let mut input_blocks = 0;
         if sequential {
-            // Bound by the input file (for writes) and by the region.
             if let Some(inp) = &input {
-                let file_blocks = inp.metadata()?.len() >> shift;
-                limit = Some(limit.map_or(file_blocks, |b| b.min(file_blocks)));
+                // Write mode: the input file is the payload source.
+                input_blocks = inp.metadata()?.len() >> shift;
+
+                // Number of blocks the run intends to write: explicit
+                // --blocks, else fill the whole region when looping, else
+                // write the input once.
+                let target = match args.blocks {
+                    Some(b) => b.min(region_blocks),
+                    None if args.loop_input => region_blocks,
+                    None => input_blocks.min(region_blocks),
+                };
+
+                if target > input_blocks {
+                    if !args.loop_input {
+                        return Err(anyhow!(
+                            "input file holds {input_blocks} block(s) but {target} were \
+                             requested; pass --loop-input to repeat the input"
+                        ));
+                    }
+                    if input_blocks == 0 {
+                        return Err(anyhow!(
+                            "input file is shorter than one block of {bs} bytes"
+                        ));
+                    }
+                }
+
+                limit = Some(target);
+            } else {
+                // Read mode: bound by the region (and --blocks).
+                limit = Some(limit.map_or(region_blocks, |b| b.min(region_blocks)));
             }
-            limit = Some(limit.map_or(region_blocks, |b| b.min(region_blocks)));
         }
 
         let mut buffers = Vec::new();
@@ -294,6 +333,7 @@ impl State<u64> {
             limit,
             submitted: 0,
             input,
+            input_blocks,
             output,
             offsets: vec![0; depth as usize],
         })
@@ -411,14 +451,18 @@ fn enqueue_io(state: &mut State<u64>) -> Result<()> {
 
     let buf_ptr = state.buf[buffer_index as usize].as_ptr();
 
-    // For file-backed writes, fill the buffer with the payload at the matching
-    // position in the input file before submitting.
+    // For file-backed writes, fill the buffer with the payload from the
+    // matching position in the input file before submitting. When the input is
+    // shorter than the run (--loop-input), the source block wraps around. When
+    // it isn't, the block index never reaches input_blocks, so this is a no-op.
     if state.rw == Rw::Write {
         if let Some(input) = &state.input {
             let buf = unsafe {
                 std::slice::from_raw_parts_mut(buf_ptr.cast::<u8>(), state.bs as usize)
             };
-            input.read_exact_at(buf, offset)?;
+            let block = offset >> state.shift;
+            let input_offset = (block % state.input_blocks) << state.shift;
+            input.read_exact_at(buf, input_offset)?;
         }
     }
 
